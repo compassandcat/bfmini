@@ -1,0 +1,37 @@
+# 
+
+# resource
+resource BEEPER 1 B02
+resource MOTOR 1 B06
+resource MOTOR 2 B05
+resource MOTOR 3 B04
+resource MOTOR 4 B07
+resource SERVO 1 A08
+resource PPM 1 A03
+resource SERIAL_TX 1 A09
+resource SERIAL_TX 2 A02
+resource SERIAL_RX 1 A10
+resource SERIAL_RX 2 A03
+resource SOFTSERIAL_TX 1 A15
+resource SOFTSERIAL_RX 1 B03
+resource I2C_SCL 1 B08
+resource I2C_SDA 1 B09
+resource LED 1 C13
+resource LED 2 C14
+resource SPI_SCK 1 A05
+resource SPI_SCK 2 B13
+resource SPI_SDI 1 A06
+resource SPI_SDI 2 B14
+resource SPI_SDO 1 A07
+resource SPI_SDO 2 B15
+resource ADC_BATT 1 B00
+resource ADC_CURR 1 B01
+resource PINIO 1 B10
+resource PINIO 2 C14
+resource FLASH_CS 1 A00
+resource OSD_CS 1 B12
+resource GYRO_EXTI 1 A01
+resource GYRO_CS 1 A04
+resource USB_DETECT 1 C15
+
+# 

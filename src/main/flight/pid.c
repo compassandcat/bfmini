@@ -158,6 +158,10 @@ float diskDiffRate = 0.0, diskAngularRate = 0.0;
 #ifdef MODULAR_PSEUDO_INVERSE
 float actuatorOutput[4];
 float servoPitchFF;
+float anglerad[4]; 
+Vec3 axis;
+bool openmixer = true ;
+bool previous_state = true;
 // For testing pesudo inverse on quadcopter
 #ifdef MODULAR_TEST_QUAD
 // 核心：4×3伪逆矩阵J_pinv（直接写死，无需计算）
@@ -174,6 +178,7 @@ const float quad_J_pinv[4][3] = {
 #endif
 // ---------------- 计算缓存（无需存储，仅运行时） ----------------
 float J_pinv[2][3];        // 预计算的伪逆矩阵（init阶段生成）
+
 // PG注册（实现Flash存储）
 PG_REGISTER_WITH_RESET_TEMPLATE(ServoRotorMixer_t, servoRotorMixer, 
                                 PG_SERVO_ROTOR_MIXER, SERVO_ROTOR_MIXER_VER);
@@ -195,6 +200,128 @@ PG_RESET_TEMPLATE(ServoRotorMixer_t, servoRotorMixer,
 // ServoRotorMixer_t servoRotorMixer;
 
 // ------------------- 辅助向量运算函数（对应Matlab的向量操作） -------------------
+//矩阵计算前馈
+static inline float clampf_(float x, float lo, float hi)
+{
+    return (x < lo) ? lo : ((x > hi) ? hi : x);
+}
+
+static inline Vec3 vec3(float x, float y, float z)
+{
+    Vec3 v = {x, y, z};
+    return v;
+}
+
+static inline float dot3(Vec3 a, Vec3 b)
+{
+    return a.x*b.x + a.y*b.y + a.z*b.z;
+}
+
+static inline float norm3(Vec3 a)
+{
+    return sqrtf(dot3(a, a));
+}
+
+static inline Vec3 normalize3(Vec3 a)
+{
+    float n = norm3(a);
+    if (n < 1e-8f) return vec3(0.0f, 0.0f, 0.0f);
+    return vec3(a.x/n, a.y/n, a.z/n);
+}
+
+static inline Mat3 mat3_mul(Mat3 A, Mat3 B)
+{
+    Mat3 C = {0};
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) {
+            C.m[i][j] = 0.0f;
+            for (int k = 0; k < 3; k++) {
+                C.m[i][j] += A.m[i][k] * B.m[k][j];
+            }
+        }
+    }
+    return C;
+}
+
+static inline Mat3 mat3_transpose(Mat3 A)
+{
+    Mat3 T;
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) {
+            T.m[i][j] = A.m[j][i];
+        }
+    }
+    return T;
+}
+
+// R = Ry(pitch) * Rx(roll)
+// 如果你的欧拉角定义和这个顺序不同，整体符号/方向可能会差一个负号，需要实机/仿真对一下
+static Mat3 rot_from_roll_pitch(float roll, float pitch)
+{
+    float cr = cosf(roll);
+    float sr = sinf(roll);
+    float cp = cosf(pitch);
+    float sp = sinf(pitch);
+
+    Mat3 Rx = {{
+        {1.0f, 0.0f, 0.0f},
+        {0.0f, cr,   -sr  },
+        {0.0f, sr,    cr  }
+    }};
+
+    Mat3 Ry = {{
+        { cp,  0.0f, sp},
+        {0.0f, 1.0f, 0.0f},
+        {-sp,  0.0f, cp}
+    }};
+
+    return mat3_mul(Ry, Rx);
+}
+
+// 把旋转矩阵映射成旋转向量 r，满足 exp([r]x)=R
+static Vec3 rotmat_to_rotvec(Mat3 R)
+{
+    float tr = R.m[0][0] + R.m[1][1] + R.m[2][2];
+    float c = clampf_((tr - 1.0f) * 0.5f, -1.0f, 1.0f);
+    float angle = acosf(c);
+
+    Vec3 v = vec3(
+        R.m[2][1] - R.m[1][2],
+        R.m[0][2] - R.m[2][0],
+        R.m[1][0] - R.m[0][1]
+    );
+
+    if (angle < 1e-5f) {
+        // 小角度近似
+        return vec3(0.5f * v.x, 0.5f * v.y, 0.5f * v.z);
+    } else {
+        float s = 0.5f * angle / sinf(angle);
+        return vec3(s * v.x, s * v.y, s * v.z);
+    }
+}
+
+// 推荐：直接得到“沿 axis_b 的角度误差”
+// 返回值 > 0 / < 0 的符号，取决于你的欧拉角定义与轴方向定义
+float axis_angle_error_ff(float roll_cur, float pitch_cur,
+                          float roll_tgt, float pitch_tgt,
+                          Vec3 axis_b)
+{
+    axis_b = normalize3(axis_b);
+
+    Mat3 R_cur = rot_from_roll_pitch(roll_cur, pitch_cur);
+    Mat3 R_tgt = rot_from_roll_pitch(roll_tgt, pitch_tgt);
+
+    // 当前 -> 目标 的相对旋转，在当前机体系表达
+    Mat3 R_err = mat3_mul(mat3_transpose(R_cur), R_tgt);
+
+    Vec3 r_err = rotmat_to_rotvec(R_err);
+
+    // 投影到舵机转轴
+    float e_axis = dot3(axis_b, r_err);
+    return e_axis;
+}
+
+
 // 向量叉乘：res = a × b
 void vectorCross(const float a[3], const float b[3], float res[3]) {
     res[0] = a[1] * b[2] - a[2] * b[1];
@@ -240,7 +367,7 @@ void servoRotorMixerInit(void) {
     NormalizeVector(RotationAxis);
     // 推力中心单位化
     float LiftCenter[3] = {(float)servoRotorMixer()->LiftCenter[0]/1000.0f, (float)servoRotorMixer()->LiftCenter[1]/1000.0f, (float)servoRotorMixer()->LiftCenter[2]/1000.0f};
-    NormalizeVector(LiftCenter);
+    //NormalizeVector(LiftCenter);
     // 初始推力方向单位化
     float t0[3] = {(float)servoRotorMixer()->t0[0]/1000.0f, (float)servoRotorMixer()->t0[1]/1000.0f, (float)servoRotorMixer()->t0[2]/1000.0f};
     NormalizeVector(t0);
@@ -248,6 +375,11 @@ void servoRotorMixerInit(void) {
     float T_eq = (servoRotorMixer()->T_eq < 0.0f) ? 0.0f : (float)servoRotorMixer()->T_eq/1000.0f;
     // 平衡点倾转角单位化
     float theta_eq = (float)servoRotorMixer()->theta_eq/1000.0f;
+
+    //前馈计算
+    axis.x = RotationAxis[0];
+    axis.y = RotationAxis[1];
+    axis.z = RotationAxis[2];
 
     // ---------------- 2. 计算θ_eq下的推力方向t_eq（罗德里格斯旋转） ----------------
     float cos_theta_eq = cosf(theta_eq);
@@ -328,12 +460,21 @@ void servoRotorMixerCalc(const float pid_sum[3], float *T_des, float *theta_des)
 
     // 核心修改：从PIDsum计算tau_d
     tau_d[0] = (float)pid_sum[0] / (float)servoRotorMixer()->tau_scaler[0]*5.0f;
-    tau_d[1] = (float)pid_sum[1] / (float)servoRotorMixer()->tau_scaler[1]*5.0f;
+    tau_d[1] = -(float)pid_sum[1] / (float)servoRotorMixer()->tau_scaler[1]*5.0f;
     tau_d[2] = (float)pid_sum[2] / (float)servoRotorMixer()->tau_scaler[2]*5.0f;
 
     // 原有delta_u计算逻辑（J_pinv * tau_d）
     delta_u[0] = J_pinv[0][0] * tau_d[0] + J_pinv[0][1] * tau_d[1] + J_pinv[0][2] * tau_d[2];
     delta_u[1] = J_pinv[1][0] * tau_d[0] + J_pinv[1][1] * tau_d[1] + J_pinv[1][2] * tau_d[2];
+
+
+    // position_msp.msg1 = J_pinv[0][0]  * 100.0f;
+    // position_msp.msg2 = J_pinv[0][1]  * 100.0f;
+    // position_msp.msg3 = J_pinv[0][2]  * 100.0f;
+    //position_msp.msg4 =  tau_d[0] * 100.0f;
+    position_msp.msg5 = J_pinv[0][0] * tau_d[0]  * 100.0f;
+    position_msp.msg6 = delta_u[0]  * 100.0f;
+    servoPitchFF = axis_angle_error_ff(anglerad[2],-anglerad[0],anglerad[3],-anglerad[1],axis)/3.14f*180.0f;
 
     // 原有推力、转角约束逻辑不变...
     // 缩放系数通过 https://store.tmotor.com/product/mn5006-kv450-motor-antigravity-type.html 数据得到
@@ -677,7 +818,14 @@ STATIC_UNIT_TESTED FAST_CODE_NOINLINE float pidLevel(int axis, const pidProfile_
 
 #ifdef MODULAR_PSEUDO_INVERSE
     if(axis == FD_PITCH){
-        servoPitchFF = currentAngle - angleTarget;
+        //servoPitchFF = currentAngle - angleTarget;
+        //position_msp.msg5 = currentAngle * 100.0f;
+        anglerad[0] = currentAngle/180*M_PIf;
+        anglerad[1] = angleTarget/180*M_PIf;
+
+    }else if(axis == FD_ROLL){
+        anglerad[2] = currentAngle/180*M_PIf;
+        anglerad[3] = angleTarget/180*M_PIf;
     }
 #endif
 
@@ -704,6 +852,7 @@ STATIC_UNIT_TESTED FAST_CODE_NOINLINE float pidLevel(int axis, const pidProfile_
         angleTarget = -bodyPitchTarget;
 #endif
     const float errorAngle = angleTarget - currentAngle;
+    //position_msp.msg1 = errorAngle * 100.0f;
     // 角度环=反馈+前馈  240730 jsl
     float angleRate = errorAngle * pidRuntime.angleGain; //+ angleFeedforward; 240728 jsl
     // if(axis == FD_PITCH)
@@ -1338,6 +1487,7 @@ void FAST_CODE pidController(const pidProfile_t *pidProfile, timeUs_t currentTim
                 pidRuntime.axisInAngleMode[axis] = true;
                 // 2. Roll Pitch角度环（currentPidSetpoint in, currentPidSetpoint out） 240730 jsl
                 currentPidSetpoint = pidLevel(axis, pidProfile, angleTrim, currentPidSetpoint, horizonLevelStrength); // curSP经过角度环、是期望角速度 240730 jsl
+
             }
         } else { // yaw axis only
             if (levelMode == LEVEL_MODE_RP) {
@@ -1440,7 +1590,10 @@ void FAST_CODE pidController(const pidProfile_t *pidProfile, timeUs_t currentTim
             }
         }
 #endif
-
+        if (axis == FD_YAW){
+            //position_msp.msg4 = currentPidSetpoint  * 100.0f;
+            //position_msp.msg1 =  gyroRate *100.0f;
+        }
 
         float errorRate = currentPidSetpoint - gyroRate; // r - y
 #if defined(USE_ACC)
@@ -1643,6 +1796,14 @@ void FAST_CODE pidController(const pidProfile_t *pidProfile, timeUs_t currentTim
 #else
         // 3.6 calculating the PID sum (pidData.Sum out)
         const float pidSum = pidData[axis].P + pidData[axis].I + pidData[axis].D + pidData[axis].F;
+        if (axis == FD_YAW)
+        {
+            //position_msp.msg1 =  *100.0f;
+            //position_msp.msg4 = pidData[axis].I *100.0f;
+            //position_msp.msg5 = pidSum *100.0f;
+
+        }
+        
 #endif
 #ifdef USE_INTEGRATED_YAW_CONTROL
         if (axis == FD_YAW && pidRuntime.useIntegratedYaw) {
@@ -1667,16 +1828,32 @@ void FAST_CODE pidController(const pidProfile_t *pidProfile, timeUs_t currentTim
 #ifdef MODULAR_PSEUDO_INVERSE
     float pidSUM[3] = {pidData[FD_ROLL].Sum, pidData[FD_PITCH].Sum, pidData[FD_YAW].Sum};
     #ifdef MODULAR_TEST_QUAD
-    servoRotorMixerQuadCalc(pidSUM, actuatorOutput);
-    position_msp.msg1 = actuatorOutput[0]*100;
+    servoRotorMixerQuadCalc(pidSUM, actuatorOutput);  
+    position_msp.msg1 = actuatorOutput[0]*100;  
     #endif
     float T_des, theta_des;
     servoRotorMixerCalc(pidSUM, &T_des, &theta_des);
     actuatorOutput[0] = T_des;
     actuatorOutput[1] = theta_des;
-    // 油门比小于10时舵机仅保留中位
-    if(calculateThrottlePercentAbs() < 10.0f){
+    
+    //position_msp.msg6 = T_des * 100.0f;
+
+    // 油门比小于20时舵机仅保留中位
+
+    bool arming_state = ARMING_FLAG(ARMED);
+    
+    if (arming_state != previous_state){
+        openmixer = true;
+    }
+
+    previous_state = arming_state;
+
+    if(calculateThrottlePercentAbs() < 25.0f && openmixer){
         actuatorOutput[1] = servoRotorMixer()->theta_eq/1000.0f / (M_PI/3.0f) * 500.0f;
+        actuatorOutput[0] = 0;
+        pidResetIterm();
+    }else{
+        openmixer = false;
     }
     
 #endif

@@ -589,7 +589,7 @@ void servoMixer(void)
             target指左舵/右舵
             240731 jsl*/
             servo[target] += servoDirection(target, from) * constrain(((int32_t)currentOutput[i] * currentServoMixer[i].rate) / 100, min, max);
-            position_msp.msg1 = servo[target]*100;
+            //position_msp.msg1 = servo[target]*100;
             // position_msp.msg2 = servo[SERVO_BICOPTER_LEFT]*100.0f;
             // position_msp.msg3 = servo[SERVO_BICOPTER_RIGHT]*100.0f;
             
@@ -625,8 +625,11 @@ void servoMixer(void)
     uint16_t Modular_servo_width = servoParams(Modular_target)->max - servoParams(Modular_target)->min;
     int16_t Modular_min = currentServoMixer[0].min * Modular_servo_width / 100 - Modular_servo_width / 2;
     int16_t Modular_max = currentServoMixer[0].max * Modular_servo_width / 100 - Modular_servo_width / 2;
-    servo[Modular_target] = servoDirection(Modular_target, Modular_from) * constrain(((int32_t)actuatorOutput[1] * currentServoMixer[0].rate) / 100 - servoPitchFF / 60.0f * 500.0f * 0.7f, Modular_min, Modular_max);
-    position_msp.msg2 = servo[Modular_target]*100;
+    //servo[Modular_target] = servoDirection(Modular_target, Modular_from) * constrain(((int32_t)actuatorOutput[1] * currentServoMixer[0].rate) / 100 + servoPitchFF / 60.0f * 500.0f * 0.7f, Modular_min, Modular_max);
+    servo[Modular_target] = servoDirection(Modular_target, Modular_from) * constrain(((int32_t)actuatorOutput[1] * currentServoMixer[0].rate) / 100 + 0.0f*servoPitchFF / 60.0f * 500.0f * 0.7f, Modular_min, Modular_max);
+    //position_msp.msg2 = servo[Modular_target] * 100;
+    //position_msp.msg3 = actuatorOutput[1]  * 100.0f;
+
 #endif
     /*
     logdebug 1. 记录未加中值、未滤波的原始指令 (700 800) 240802 jsl
@@ -640,7 +643,6 @@ void servoMixer(void)
 
     for (int i = 0; i < MAX_SUPPORTED_SERVOS; i++) {
         servo[i] = ((int32_t)servoParams(i)->rate * servo[i]) / 100L; // 有个放大0-1.25倍，但一般就是1倍，240802 jsl
-
         /*logdebug 2. 记录有方向的指令*/
 #ifdef SERVO_LOG_DEBUG_LEFT
         if (i == SERVO_BICOPTER_LEFT){

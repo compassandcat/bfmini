@@ -396,7 +396,13 @@ static void applyMixToMotors(float motorMix[MAX_SUPPORTED_MOTORS], motorMixer_t 
         #ifdef MODULAR_TEST_QUAD
         float motorOutput = motorOutputMixSign * actuatorOutput[i] + throttle * activeMixer[i].throttle + motorMix[i]*0.0f;
         #elif defined(MODULAR_PSEUDO_INVERSE)
-        float motorOutput = motorOutputMixSign * actuatorOutput[i] + throttle * activeMixer[i].throttle + motorMix[i]*0.0f;
+        float motorOutput = motorOutputMixSign * actuatorOutput[0] + throttle * activeMixer[i].throttle + motorMix[i]*0.0f;
+        if(i == 0){
+            position_msp.msg1 =  actuatorOutput[0]*100.0f;
+            position_msp.msg2 =  throttle *100.0f;
+            position_msp.msg3 =  motorOutput * 100.0f;
+            position_msp.msg4 =  activeMixer[i].throttle * 100.0f;
+        }
         #else
         float motorOutput = motorOutputMixSign * motorMix[i] + throttle * activeMixer[i].throttle;
         #endif
@@ -779,7 +785,7 @@ FAST_CODE_NOINLINE void mixTable(timeUs_t currentTimeUs)
         // motor_stop handling
         applyMotorStop();
     } else {
-        position_msp.msg3 = motorMix[0]*100;
+        //position_msp.msg3 = motorMix[0]*100;
         // Apply the mix to motor endpoints
         applyMixToMotors(motorMix, activeMixer);
     }

@@ -113,12 +113,22 @@ extern float bodyPitchTarget;
 // 伪逆正则化系数（对应Matlab的lambda）
 #define MIXER_LAMBDA (1e-6f)
 // 反扭系数
-#define SERVO_ROTOR_K_TORQUE 0.0219f
+#define SERVO_ROTOR_K_TORQUE 0.0254f*0.0f
 
 // 控制量输出
 extern float actuatorOutput[4];
 // 期望角度前馈给舵机
 extern float servoPitchFF;
+
+//向量定义
+typedef struct {
+    float x, y, z;
+} Vec3;
+
+//矩阵定义
+typedef struct {
+    float m[3][3];
+} Mat3;
 
 // 存储Mixer所有参数（含PG存储+计算缓存）
 typedef struct {
