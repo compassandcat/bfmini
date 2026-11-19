@@ -157,9 +157,11 @@ float diskDiffRate = 0.0, diskAngularRate = 0.0;
 // JJJJJJJack Modular copter
 #ifdef MODULAR_PSEUDO_INVERSE
 float actuatorOutput[4];
+float actuatorThetaRad = 0.0f;
 float servoPitchFF;
 float anglerad[4]; 
 Vec3 axis;
+static Vec3 t0_unit = {0.0f, 0.0f, -1.0f};
 bool openmixer = true ;
 bool previous_state = true;
 // For testing pesudo inverse on quadcopter
@@ -376,10 +378,13 @@ void servoRotorMixerInit(void) {
     // 平衡点倾转角单位化
     float theta_eq = (float)servoRotorMixer()->theta_eq/1000.0f;
 
-    //前馈计算
+    //前馈与推力向量计算缓存
     axis.x = RotationAxis[0];
     axis.y = RotationAxis[1];
     axis.z = RotationAxis[2];
+    t0_unit.x = t0[0];
+    t0_unit.y = t0[1];
+    t0_unit.z = t0[2];
 
     // ---------------- 2. 计算θ_eq下的推力方向t_eq（罗德里格斯旋转） ----------------
     float cos_theta_eq = cosf(theta_eq);
@@ -468,12 +473,6 @@ void servoRotorMixerCalc(const float pid_sum[3], float *T_des, float *theta_des)
     delta_u[1] = J_pinv[1][0] * tau_d[0] + J_pinv[1][1] * tau_d[1] + J_pinv[1][2] * tau_d[2];
 
 
-    // position_msp.msg1 = J_pinv[0][0]  * 100.0f;
-    // position_msp.msg2 = J_pinv[0][1]  * 100.0f;
-    // position_msp.msg3 = J_pinv[0][2]  * 100.0f;
-    //position_msp.msg4 =  tau_d[0] * 100.0f;
-    position_msp.msg5 = J_pinv[0][0] * tau_d[0]  * 100.0f;
-    position_msp.msg6 = delta_u[0]  * 100.0f;
     servoPitchFF = axis_angle_error_ff(anglerad[2],-anglerad[0],anglerad[3],-anglerad[1],axis)/3.14f*180.0f;
 
     // 原有推力、转角约束逻辑不变...
@@ -481,11 +480,57 @@ void servoRotorMixerCalc(const float pid_sum[3], float *T_des, float *theta_des)
     *T_des = delta_u[0] * 0.03f;  // 推力→电机值的缩放系数 
 
 
-    *theta_des = servoRotorMixer()->theta_eq/1000.0f + delta_u[1];
-    *theta_des = (*theta_des > SERVO_THETA_LIMIT_RAD) ? SERVO_THETA_LIMIT_RAD : *theta_des;
-    *theta_des = (*theta_des < -SERVO_THETA_LIMIT_RAD) ? -SERVO_THETA_LIMIT_RAD : *theta_des;
+    float theta_rad = servoRotorMixer()->theta_eq / 1000.0f + delta_u[1];
+    theta_rad = clampf_(theta_rad, -SERVO_THETA_LIMIT_RAD, SERVO_THETA_LIMIT_RAD);
+    actuatorThetaRad = theta_rad;
     // 数值 500 对应 60度
-    *theta_des = *theta_des / (M_PI / 3.0f) * 500.0f;
+    *theta_des = theta_rad / (M_PI / 3.0f) * 500.0f;
+}
+
+void servoRotorUpdateThrustVector(float motorOutputNorm) {
+    // 1. 由罗德里格斯公式计算当前倾角 theta 下机体系的推力单位向量 t_b
+    const float cos_t = cosf(actuatorThetaRad);
+    const float sin_t = sinf(actuatorThetaRad);
+    const Vec3 r_cross_t0 = vec3(
+        axis.y * t0_unit.z - axis.z * t0_unit.y,
+        axis.z * t0_unit.x - axis.x * t0_unit.z,
+        axis.x * t0_unit.y - axis.y * t0_unit.x
+    );
+    const float r_dot_t0 = dot3(axis, t0_unit);
+    const Vec3 t_b = vec3(
+        cos_t * t0_unit.x + sin_t * r_cross_t0.x + (1.0f - cos_t) * r_dot_t0 * axis.x,
+        cos_t * t0_unit.y + sin_t * r_cross_t0.y + (1.0f - cos_t) * r_dot_t0 * axis.y,
+        cos_t * t0_unit.z + sin_t * r_cross_t0.z + (1.0f - cos_t) * r_dot_t0 * axis.z
+    );
+
+    // 2. 推力大小 (mN)：解锁后使用实时电机推力，地面未解锁时用 T_eq 便于不转桨极性自检
+    float T_now_mN = 0.0f;
+    if (ARMING_FLAG(ARMED)) {
+        T_now_mN = fmaxf(0.0f, motorOutputNorm / 0.03f) * 1000.0f;
+    } else {
+        T_now_mN = fmaxf(0.0f, (float)servoRotorMixer()->T_eq);
+    }
+
+    const Vec3 f_b = vec3(T_now_mN * t_b.x, T_now_mN * t_b.y, T_now_mN * t_b.z);
+
+    // 3. 用本模块 IMU 的 roll/pitch (yaw=0 水平惯性系) 将机体系推力转到地面水平惯性系 v_i
+    const rollAndPitchTrims_t *angleTrim = &accelerometerConfig()->accelerometerTrims;
+    const float roll_rad = DEGREES_TO_RADIANS((attitude.raw[FD_ROLL] - angleTrim->raw[FD_ROLL]) / 10.0f);
+    const float pitch_rad = DEGREES_TO_RADIANS((attitude.raw[FD_PITCH] - angleTrim->raw[FD_PITCH]) / 10.0f);
+    const Mat3 R_cur = rot_from_roll_pitch(roll_rad, -pitch_rad);
+
+    const Vec3 v_i = vec3(
+        R_cur.m[0][0] * f_b.x + R_cur.m[0][1] * f_b.y + R_cur.m[0][2] * f_b.z,
+        R_cur.m[1][0] * f_b.x + R_cur.m[1][1] * f_b.y + R_cur.m[1][2] * f_b.z,
+        R_cur.m[2][0] * f_b.x + R_cur.m[2][1] * f_b.y + R_cur.m[2][2] * f_b.z
+    );
+
+    // 4. 通过 MSP_WP (position_msp) 导出 v_i (mN)、推力模长 (mN) 与舵机倾角 (mrad)
+    position_msp.msg1 = lrintf(v_i.x);
+    position_msp.msg2 = lrintf(v_i.y);
+    position_msp.msg3 = lrintf(v_i.z);
+    position_msp.msg4 = lrintf(T_now_mN);
+    position_msp.msg5 = lrintf(actuatorThetaRad * 1000.0f);
 }
 
 #ifdef MODULAR_TEST_QUAD
@@ -1849,7 +1894,8 @@ void FAST_CODE pidController(const pidProfile_t *pidProfile, timeUs_t currentTim
     previous_state = arming_state;
 
     if(calculateThrottlePercentAbs() < 25.0f && openmixer){
-        actuatorOutput[1] = servoRotorMixer()->theta_eq/1000.0f / (M_PI/3.0f) * 500.0f;
+        actuatorThetaRad = servoRotorMixer()->theta_eq / 1000.0f;
+        actuatorOutput[1] = actuatorThetaRad / (M_PI / 3.0f) * 500.0f;
         actuatorOutput[0] = 0;
         pidResetIterm();
     }else{

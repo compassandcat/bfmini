@@ -117,6 +117,8 @@ extern float bodyPitchTarget;
 
 // 控制量输出
 extern float actuatorOutput[4];
+// 实时舵机倾转角（弧度），用于推力向量合成
+extern float actuatorThetaRad;
 // 期望角度前馈给舵机
 extern float servoPitchFF;
 
@@ -150,6 +152,9 @@ void servoRotorMixerInit(void);
 
 // 调整函数声明：传入PIDsum，内部计算tau_d
 void servoRotorMixerCalc(const float pid_sum[3], float *T_des, float *theta_des);
+
+// 根据实时电机归一化输出与当前舵机倾角，计算水平惯性系下的单模块推力向量 v_i (mN) 并写入 position_msp
+void servoRotorUpdateThrustVector(float motorOutputNorm);
 
 #ifdef MODULAR_TEST_QUAD
 // 输入：pid_sum[3]（BF的ROLL/PITCH/YAW PID输出）

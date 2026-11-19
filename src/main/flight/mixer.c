@@ -398,10 +398,7 @@ static void applyMixToMotors(float motorMix[MAX_SUPPORTED_MOTORS], motorMixer_t 
         #elif defined(MODULAR_PSEUDO_INVERSE)
         float motorOutput = motorOutputMixSign * actuatorOutput[0] + throttle * activeMixer[i].throttle + motorMix[i]*0.0f;
         if(i == 0){
-            position_msp.msg1 =  actuatorOutput[0]*100.0f;
-            position_msp.msg2 =  throttle *100.0f;
-            position_msp.msg3 =  motorOutput * 100.0f;
-            position_msp.msg4 =  activeMixer[i].throttle * 100.0f;
+            servoRotorUpdateThrustVector(motorOutput);
         }
         #else
         float motorOutput = motorOutputMixSign * motorMix[i] + throttle * activeMixer[i].throttle;
